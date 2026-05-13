@@ -1,0 +1,13 @@
+{
+  "name": "workshop-query-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tiny web UI for ad-hoc Flink SQL Gateway queries over Paimon",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

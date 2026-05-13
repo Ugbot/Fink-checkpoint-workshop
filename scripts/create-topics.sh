@@ -9,7 +9,7 @@ RF=1
 
 echo "Creating Kafka topics on $BOOTSTRAP ..."
 
-for TOPIC in "topic.in" "topic.mid" "topic.out"; do
+for TOPIC in "topic.in" "topic.mid" "topic.out" "trades.scenario06"; do
   if podman exec workshop-kafka /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server "$INTERNAL_BOOTSTRAP" \
       --list 2>/dev/null | grep -qx "$TOPIC"; then

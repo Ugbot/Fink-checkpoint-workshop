@@ -1,10 +1,16 @@
 version: "3.8"
 
 # Run with: podman-compose up -d
-# Flink Web UI:  http://localhost:18081
-# Kafka UI:      (not included — use verify scripts or kcat)
-# Kafka broker:  localhost:19092
-# PostgreSQL:    localhost:15432  (user: workshop / pass: workshop / db: workshop)
+#
+# Service map (host-facing ports):
+#   Flink ingest UI    http://localhost:18081
+#   Flink query UI     http://localhost:18181
+#   Flink SQL Gateway  http://localhost:18083   (REST)
+#   Query Web UI       http://localhost:3000
+#   MinIO console      http://localhost:19001   (workshop / workshopsecret)
+#   MinIO S3 API       http://localhost:19000
+#   Kafka broker       localhost:19092
+#   PostgreSQL         localhost:15432
 
 services:
 
@@ -51,13 +57,65 @@ services:
     networks:
       - workshop-net
 
+  # ────────────────────────────────────────────────────────────────
+  # Scenario 06: MinIO (S3-compatible storage for Paimon warehouse)
+  # ────────────────────────────────────────────────────────────────
+  minio:
+    image: docker.io/minio/minio:latest
+    container_name: workshop-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    environment:
+      MINIO_ROOT_USER: workshop
+      MINIO_ROOT_PASSWORD: workshopsecret
+    volumes:
+      - minio-data:/data
+    networks:
+      - workshop-net
+
+  # One-shot init container: creates the `paimon` bucket idempotently
+  minio-init:
+    image: docker.io/minio/mc:latest
+    container_name: workshop-minio-init
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://workshop-minio:9000 workshop workshopsecret >/dev/null 2>&1; do
+          echo "waiting for minio..."; sleep 1;
+        done
+        mc mb -p local/paimon || true
+        mc ls local/
+        echo "minio init complete"
+    networks:
+      - workshop-net
+    restart: "no"
+
+  # ────────────────────────────────────────────────────────────────
+  # Ingest Flink cluster (also used by scenarios 01-05).
+  # Built from ./docker/flink-paimon so the same image carries the
+  # Paimon connector + S3 plugin used by scenario-06.
+  # The image is a strict superset of flink:1.20 — scenarios 01-05
+  # keep working unchanged.
+  # ────────────────────────────────────────────────────────────────
   flink-jobmanager:
-    image: docker.io/library/flink:1.20
+    build:
+      context: ./docker/flink-paimon
+    image: workshop/flink-paimon:1.20
     container_name: workshop-jobmanager
     command: jobmanager
     ports:
       - "18081:8081"
     environment:
+      MINIO_ENDPOINT: http://workshop-minio:9000
+      MINIO_ACCESS_KEY: workshop
+      MINIO_SECRET_KEY: workshopsecret
+      PAIMON_WAREHOUSE: s3a://paimon/warehouse
+      KAFKA_BOOTSTRAP: workshop-kafka:9093
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: workshop-jobmanager
         taskmanager.numberOfTaskSlots: 8
@@ -66,6 +124,10 @@ services:
         state.checkpoints.dir: file:///opt/flink/checkpoints
         state.savepoints.dir: file:///opt/flink/savepoints
         execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        s3.endpoint: http://workshop-minio:9000
+        s3.access-key: workshop
+        s3.secret-key: workshopsecret
+        s3.path.style.access: true
     volumes:
       - flink-checkpoints:/opt/flink/checkpoints
       - flink-savepoints:/opt/flink/savepoints
@@ -73,18 +135,124 @@ services:
       - workshop-net
 
   flink-taskmanager:
-    image: docker.io/library/flink:1.20
+    build:
+      context: ./docker/flink-paimon
+    image: workshop/flink-paimon:1.20
     container_name: workshop-taskmanager
     command: taskmanager
     depends_on:
       - flink-jobmanager
     environment:
+      MINIO_ENDPOINT: http://workshop-minio:9000
+      MINIO_ACCESS_KEY: workshop
+      MINIO_SECRET_KEY: workshopsecret
+      PAIMON_WAREHOUSE: s3a://paimon/warehouse
+      KAFKA_BOOTSTRAP: workshop-kafka:9093
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: workshop-jobmanager
         taskmanager.numberOfTaskSlots: 8
+        s3.endpoint: http://workshop-minio:9000
+        s3.access-key: workshop
+        s3.secret-key: workshopsecret
+        s3.path.style.access: true
     volumes:
       - flink-checkpoints:/opt/flink/checkpoints
       - flink-savepoints:/opt/flink/savepoints
+    networks:
+      - workshop-net
+
+  # ────────────────────────────────────────────────────────────────
+  # Scenario 06: dedicated *query* Flink session cluster.
+  # Independent of the ingest cluster so ad-hoc scans cannot
+  # destabilise the streaming write path.
+  # ────────────────────────────────────────────────────────────────
+  query-jobmanager:
+    build:
+      context: ./docker/flink-paimon
+    image: workshop/flink-paimon:1.20
+    container_name: workshop-query-jobmanager
+    command: jobmanager
+    depends_on:
+      - minio
+    ports:
+      - "18181:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: workshop-query-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+        rest.flamegraph.enabled: true
+        s3.endpoint: http://workshop-minio:9000
+        s3.access-key: workshop
+        s3.secret-key: workshopsecret
+        s3.path.style.access: true
+    volumes:
+      - query-checkpoints:/opt/flink/checkpoints
+    networks:
+      - workshop-net
+
+  query-taskmanager:
+    build:
+      context: ./docker/flink-paimon
+    image: workshop/flink-paimon:1.20
+    container_name: workshop-query-taskmanager
+    command: taskmanager
+    depends_on:
+      - query-jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: workshop-query-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        s3.endpoint: http://workshop-minio:9000
+        s3.access-key: workshop
+        s3.secret-key: workshopsecret
+        s3.path.style.access: true
+    volumes:
+      - query-checkpoints:/opt/flink/checkpoints
+    networks:
+      - workshop-net
+
+  sql-gateway:
+    build:
+      context: ./docker/flink-paimon
+    image: workshop/flink-paimon:1.20
+    container_name: workshop-sql-gateway
+    depends_on:
+      - query-jobmanager
+    ports:
+      - "18083:8083"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: workshop-query-jobmanager
+        rest.address: workshop-query-jobmanager
+        rest.port: 8081
+        s3.endpoint: http://workshop-minio:9000
+        s3.access-key: workshop
+        s3.secret-key: workshopsecret
+        s3.path.style.access: true
+    command:
+      - /bin/bash
+      - -c
+      - |
+        /opt/flink/bin/sql-gateway.sh start-foreground \
+          -Dsql-gateway.endpoint.type=rest \
+          -Dsql-gateway.endpoint.rest.address=0.0.0.0 \
+          -Dsql-gateway.endpoint.rest.port=8083
+    networks:
+      - workshop-net
+
+  query-ui:
+    build:
+      context: ./docker/query-ui
+    image: workshop/query-ui:latest
+    container_name: workshop-query-ui
+    depends_on:
+      - sql-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      GATEWAY_URL: http://workshop-sql-gateway:8083
+      PORT: "3000"
     networks:
       - workshop-net
 
@@ -92,6 +260,8 @@ volumes:
   postgres-data:
   flink-checkpoints:
   flink-savepoints:
+  query-checkpoints:
+  minio-data:
 
 networks:
   workshop-net:

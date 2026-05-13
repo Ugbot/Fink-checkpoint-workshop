@@ -2,6 +2,7 @@
 target/
 *.class
 *.jar
+dependency-reduced-pom.xml
 
 # IDE files
 .idea/

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Row count",
+    "sql": "SELECT COUNT(*) AS total_trades FROM paimon.workshop.trades"
+  },
+  {
+    "name": "Notional by ticker",
+    "sql": "SELECT ticker, COUNT(*) AS trades, SUM(quantity * price) AS notional\nFROM paimon.workshop.trades\nGROUP BY ticker\nORDER BY notional DESC"
+  },
+  {
+    "name": "Average price by side",
+    "sql": "SELECT side, COUNT(*) AS trades, AVG(price) AS avg_price\nFROM paimon.workshop.trades\nGROUP BY side"
+  },
+  {
+    "name": "Per-minute volume (tumbling window, batch)",
+    "sql": "SELECT\n  TUMBLE_START(trade_time, INTERVAL '1' MINUTE) AS window_start,\n  COUNT(*) AS trades,\n  SUM(quantity) AS shares\nFROM paimon.workshop.trades\nGROUP BY TUMBLE(trade_time, INTERVAL '1' MINUTE)\nORDER BY window_start"
+  },
+  {
+    "name": "Top 10 accounts by activity",
+    "sql": "SELECT account_id, COUNT(*) AS trades, SUM(quantity * price) AS notional\nFROM paimon.workshop.trades\nGROUP BY account_id\nORDER BY trades DESC\nLIMIT 10"
+  },
+  {
+    "name": "Paimon snapshots (system table)",
+    "sql": "SELECT snapshot_id, schema_id, commit_kind, commit_time, total_record_count\nFROM paimon.workshop.`trades$snapshots`\nORDER BY snapshot_id DESC"
+  },
+  {
+    "name": "Sample 10 rows",
+    "sql": "SELECT * FROM paimon.workshop.trades LIMIT 10"
+  }
+]

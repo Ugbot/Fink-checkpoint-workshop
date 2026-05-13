@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Flink + Paimon — Workshop Query UI</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 1.5rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #0e1116; color: #d7dde4;
+    }
+    h1 { margin: 0 0 0.25rem; font-size: 1.15rem; color: #79c0ff; }
+    h1 small { color: #8b949e; font-weight: normal; font-size: 0.8rem; margin-left: 0.5rem; }
+    .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin: 0.75rem 0; }
+    label { color: #8b949e; font-size: 0.8rem; }
+    select, button, textarea {
+      background: #161b22; color: #d7dde4; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.4rem 0.6rem; font-family: inherit; font-size: 0.85rem;
+    }
+    textarea {
+      width: 100%; min-height: 160px; resize: vertical;
+      line-height: 1.4;
+    }
+    button {
+      cursor: pointer; background: #1f6feb; border-color: #1f6feb; color: white;
+      padding: 0.45rem 1rem; font-weight: 600;
+    }
+    button:disabled { opacity: 0.5; cursor: wait; }
+    .status { font-size: 0.8rem; color: #8b949e; }
+    .status.error { color: #ff7b72; white-space: pre-wrap; }
+    table {
+      border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: 0.8rem;
+    }
+    th, td {
+      border: 1px solid #30363d; padding: 0.35rem 0.55rem;
+      text-align: left; vertical-align: top; max-width: 32rem;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    th { background: #161b22; color: #79c0ff; position: sticky; top: 0; }
+    tr:nth-child(even) td { background: #11151c; }
+    .pill {
+      display: inline-block; padding: 0.05rem 0.4rem; border-radius: 999px;
+      background: #21262d; color: #8b949e; font-size: 0.7rem; margin-left: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Flink SQL Gateway <small>→ Paimon lakehouse on MinIO</small></h1>
+
+  <div class="row">
+    <label for="preset">Prebaked:</label>
+    <select id="preset"><option value="">— pick a query —</option></select>
+    <button id="run">Run query</button>
+    <span id="status" class="status"></span>
+  </div>
+
+  <textarea id="sql" placeholder="SELECT * FROM paimon.workshop.trades LIMIT 10"></textarea>
+
+  <div id="meta" class="status" style="margin-top: 0.5rem;"></div>
+  <div id="results"></div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const presetSel = $("preset");
+    const sqlBox = $("sql");
+    const runBtn = $("run");
+    const statusEl = $("status");
+    const metaEl = $("meta");
+    const resultsEl = $("results");
+
+    fetch("/api/presets").then(r => r.json()).then(presets => {
+      presets.forEach((p, i) => {
+        const opt = document.createElement("option");
+        opt.value = i;
+        opt.textContent = p.name;
+        presetSel.appendChild(opt);
+      });
+      presetSel.addEventListener("change", () => {
+        const i = presetSel.value;
+        if (i === "") return;
+        sqlBox.value = presets[i].sql;
+      });
+    });
+
+    async function runQuery() {
+      const sql = sqlBox.value.trim();
+      if (!sql) return;
+      runBtn.disabled = true;
+      statusEl.textContent = "Running…";
+      statusEl.classList.remove("error");
+      metaEl.textContent = "";
+      resultsEl.innerHTML = "";
+      const t0 = performance.now();
+      try {
+        const r = await fetch("/api/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sql })
+        });
+        const body = await r.json();
+        const dt = Math.round(performance.now() - t0);
+        if (!r.ok || body.error) {
+          statusEl.textContent = "Error";
+          statusEl.classList.add("error");
+          metaEl.textContent = body.error || `HTTP ${r.status}`;
+          metaEl.classList.add("error");
+          return;
+        }
+        metaEl.classList.remove("error");
+        statusEl.textContent = `OK  ${dt} ms`;
+        const truncMsg = body.truncated ? " (truncated)" : "";
+        metaEl.innerHTML = `${body.rowCount} row${body.rowCount === 1 ? "" : "s"}${truncMsg}` +
+          (body.jobId ? ` <span class="pill">job ${body.jobId}</span>` : "");
+        renderTable(body.columns, body.rows);
+      } catch (e) {
+        statusEl.textContent = "Network error";
+        statusEl.classList.add("error");
+        metaEl.textContent = String(e);
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    function renderTable(cols, rows) {
+      if (!cols || cols.length === 0) {
+        resultsEl.innerHTML = "<p class='status'>(no result set)</p>";
+        return;
+      }
+      const t = document.createElement("table");
+      const thead = document.createElement("thead");
+      const trh = document.createElement("tr");
+      cols.forEach(c => {
+        const th = document.createElement("th");
+        th.innerHTML = `${escapeHtml(c.name)} <span class="pill">${escapeHtml(c.type)}</span>`;
+        trh.appendChild(th);
+      });
+      thead.appendChild(trh);
+      t.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      rows.forEach(row => {
+        const tr = document.createElement("tr");
+        row.forEach(v => {
+          const td = document.createElement("td");
+          td.textContent = v === null || v === undefined ? "∅" : String(v);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      t.appendChild(tbody);
+      resultsEl.appendChild(t);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+    }
+
+    runBtn.addEventListener("click", runQuery);
+    sqlBox.addEventListener("keydown", e => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") runQuery();
+    });
+  </script>
+</body>
+</html>

@@ -137,6 +137,41 @@ App 1 is a stateful enrichment job keyed by `accountId`. App 2 uses event-time t
 
 ---
 
+### Scenario 6 — Paimon lakehouse + SQL Gateway: stream-to-lake plus ad-hoc query
+
+A Kafka stream of trades is written into an **Apache Paimon** primary-key table backed by **MinIO** (S3-compatible). A **separate Flink session cluster** runs a **SQL Gateway** so analysts can issue ad-hoc SQL over the same lakehouse via REST, the interactive SQL Client, or a tiny built-in web UI — without touching the streaming ingest cluster.
+
+```
+Kafka (trades.scenario06) ──► PaimonIngestJob (ingest Flink) ──► MinIO (s3a://paimon/warehouse)
+                                                                       │
+                                                                       ▼
+                              ┌─ curl REST  ──► SQL Gateway ◄── Query Flink session cluster
+                              ├─ sql-client.sh ─►   :18083
+                              └─ Web UI :3000 ─►
+```
+
+**What this demonstrates:**
+- Streaming + lakehouse: one job that durably lands Kafka data into queryable columnar storage
+- Compute isolation: heavy ad-hoc scans run on a different Flink cluster from the ingest writer
+- Three query surfaces over the same Paimon table: REST (curl), SQL Client, Web UI
+- Paimon snapshot semantics: query visibility latency = Flink checkpoint interval (10s)
+
+**Run:**
+```bash
+podman-compose up -d --build
+./scripts/create-topics.sh          # adds trades.scenario06
+mvn -pl common,scenario-06-paimon-lakehouse -am package
+./scripts/init-paimon.sh            # creates catalog/database/table
+./scripts/submit-scenario-06.sh     # Kafka -> Paimon ingest
+# In another shell, produce trades via the existing datagen job
+./scripts/query-rest.sh "SELECT COUNT(*) FROM paimon.workshop.trades"
+open http://localhost:3000          # web UI with prebaked queries
+```
+
+**Verify:** `bash scripts/verify-06.sh`
+
+---
+
 ## Infrastructure
 
 | Service | Image | Port |
@@ -145,8 +180,13 @@ App 1 is a stateful enrichment job keyed by `accountId`. App 2 uses event-time t
 | Kafka | `bitnami/kafka:3.7` | 9092 (host), 9093 (internal) |
 | Kafka UI | `provectuslabs/kafka-ui:latest` | 8080 |
 | PostgreSQL | `postgres:16` | 5432 |
-| Flink JobManager | `apache/flink:1.20.4-java17` | 8081 |
-| Flink TaskManager | `apache/flink:1.20.4-java17` | — |
+| Flink JobManager (ingest) | `workshop/flink-paimon:1.20` | 18081 |
+| Flink TaskManager (ingest) | `workshop/flink-paimon:1.20` | — |
+| Flink JobManager (query, scenario 6) | `workshop/flink-paimon:1.20` | 18181 |
+| Flink TaskManager (query, scenario 6) | `workshop/flink-paimon:1.20` | — |
+| Flink SQL Gateway (scenario 6) | `workshop/flink-paimon:1.20` | 18083 (REST) |
+| MinIO (scenario 6) | `minio/minio:latest` | 19000 (S3), 19001 (console) |
+| Query Web UI (scenario 6) | `workshop/query-ui:latest` | 3000 |
 
 Kafka topics: `topic.in` · `topic.mid` · `topic.out` (4 partitions each)
 
@@ -168,9 +208,17 @@ flink-examples/
 ├── scenario-03-external-sink-duplicates/
 ├── scenario-04-upstream-true-duplicates/
 ├── scenario-05-rescaling-replay/
+├── scenario-06-paimon-lakehouse/        # Kafka -> Paimon + SQL Gateway
+├── docker/
+│   ├── flink-paimon/                    # Flink 1.20 image + Paimon + S3 plugin
+│   └── query-ui/                        # Node web UI for ad-hoc SQL Gateway queries
 └── scripts/
     ├── create-topics.sh
-    ├── verify-01.sh … verify-05.sh
+    ├── verify-01.sh … verify-06.sh
+    ├── init-paimon.sh                   # bootstrap Paimon catalog/table
+    ├── submit-scenario-06.sh            # submit Kafka -> Paimon ingest
+    ├── query-rest.sh                    # ad-hoc SQL via SQL Gateway REST
+    ├── sql-client.sh                    # interactive SQL Client via gateway
     └── init-postgres.sql
 ```
 

@@ -17,6 +17,7 @@
         <module>scenario-03-external-sink-duplicates</module>
         <module>scenario-04-upstream-true-duplicates</module>
         <module>scenario-05-rescaling-replay</module>
+        <module>scenario-06-paimon-lakehouse</module>
     </modules>
 
     <properties>
@@ -28,6 +29,7 @@
         <flink.version>1.20.4</flink.version>
         <flink.kafka.connector.version>3.4.0-1.20</flink.kafka.connector.version>
         <flink.jdbc.connector.version>3.3.0-1.20</flink.jdbc.connector.version>
+        <paimon.version>1.0.1</paimon.version>
         <kafka.clients.version>3.7.0</kafka.clients.version>
         <postgresql.version>42.7.3</postgresql.version>
         <jackson.version>2.17.1</jackson.version>
@@ -84,6 +86,34 @@
                 <groupId>org.apache.flink</groupId>
                 <artifactId>flink-connector-jdbc</artifactId>
                 <version>${flink.jdbc.connector.version}</version>
+            </dependency>
+
+            <!-- Flink Table API — needed by scenario-06 (StreamTableEnvironment) -->
+            <dependency>
+                <groupId>org.apache.flink</groupId>
+                <artifactId>flink-table-api-java-bridge</artifactId>
+                <version>${flink.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.flink</groupId>
+                <artifactId>flink-table-planner-loader</artifactId>
+                <version>${flink.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.flink</groupId>
+                <artifactId>flink-table-runtime</artifactId>
+                <version>${flink.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- Apache Paimon — lakehouse table format (scenario-06) -->
+            <dependency>
+                <groupId>org.apache.paimon</groupId>
+                <artifactId>paimon-flink-1.20</artifactId>
+                <version>${paimon.version}</version>
+                <scope>provided</scope>
             </dependency>
 
             <!-- Kafka native client (for DuplicateEventProducer in scenario-04) -->

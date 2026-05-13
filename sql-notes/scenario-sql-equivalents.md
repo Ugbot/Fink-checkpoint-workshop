@@ -195,3 +195,80 @@ flink run -p 4 --fromSavepoint file:///tmp/flink-savepoints/s05-before-rescale \
 ```
 
 **`pipeline.max-parallelism` note:** Flink distributes state across `max-parallelism` key groups. When you rescale from p=2 to p=4, each task now handles a smaller range of key groups — but the key group → partition mapping is fixed. Setting `max-parallelism` to a power of 2 (64, 128, 256) allows rescaling to any divisor of that value without state migration.
+
+---
+
+## Scenario 06 — Paimon lakehouse + SQL Gateway
+
+This scenario is **SQL-first by design**: the Java DataStream job exists only to wrap the Kafka source, while the actual lakehouse logic is pure Flink SQL. The same DDL is reused by `PaimonCatalogBootstrap`, `PaimonIngestJob`, the SQL Client, and the Web UI.
+
+```sql
+-- 1. Register the Paimon catalog on MinIO. Same DDL is executed at
+--    bootstrap time and on every ingest-job submission (idempotent).
+CREATE CATALOG IF NOT EXISTS paimon WITH (
+  'type'                  = 'paimon',
+  'warehouse'             = 's3a://paimon/warehouse',
+  's3.endpoint'           = 'http://workshop-minio:9000',
+  's3.access-key'         = 'workshop',
+  's3.secret-key'         = 'workshopsecret',
+  's3.path.style.access'  = 'true'
+);
+
+USE CATALOG paimon;
+CREATE DATABASE IF NOT EXISTS workshop;
+USE workshop;
+
+-- 2. Paimon primary-key table. `changelog-producer = 'input'` records the
+--    upsert stream so downstream readers can do streaming reads with
+--    proper change semantics. `bucket = 4` matches the Kafka topic.
+CREATE TABLE IF NOT EXISTS trades (
+  event_id   STRING,
+  account_id STRING,
+  ticker     STRING,
+  side       STRING,
+  quantity   INT,
+  price      DOUBLE,
+  trade_time TIMESTAMP_LTZ(3),
+  source_app STRING,
+  PRIMARY KEY (event_id) NOT ENFORCED
+) WITH (
+  'bucket'                 = '4',
+  'changelog-producer'     = 'input',
+  'snapshot.time-retained' = '1h'
+);
+
+-- 3. Streaming insert from Kafka. The Java job constructs `kafka_trades`
+--    via fromDataStream(); a fully-SQL equivalent would use the kafka
+--    connector DDL from earlier scenarios.
+INSERT INTO paimon.workshop.trades
+SELECT
+  eventId,
+  accountId,
+  ticker,
+  side,
+  quantity,
+  price,
+  TO_TIMESTAMP_LTZ(tradeTime, 3),
+  sourceApp
+FROM default_catalog.default_database.kafka_trades;
+```
+
+**Ad-hoc queries via the SQL Gateway:**
+
+```sql
+-- Lifetime row count
+SELECT COUNT(*) FROM paimon.workshop.trades;
+
+-- Per-ticker notional
+SELECT ticker, SUM(quantity * price) AS notional
+FROM paimon.workshop.trades
+GROUP BY ticker
+ORDER BY notional DESC;
+
+-- Lakehouse metadata: Paimon system tables
+SELECT snapshot_id, commit_time, total_record_count
+FROM paimon.workshop.`trades$snapshots`
+ORDER BY snapshot_id DESC;
+```
+
+**Snapshot visibility:** Paimon only publishes a new snapshot at Flink checkpoint barriers. With the workshop's default 10-second checkpoint interval, query results lag the Kafka source by at most one checkpoint — this is why `verify-06.sh` tolerates a small `kafka - paimon` delta.
