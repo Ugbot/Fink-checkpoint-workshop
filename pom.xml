@@ -18,6 +18,13 @@
         <module>scenario-04-upstream-true-duplicates</module>
         <module>scenario-05-rescaling-replay</module>
         <module>scenario-06-paimon-lakehouse</module>
+        <module>scenario-07-stream-stream-joins</module>
+        <module>scenario-08-stream-table-joins</module>
+        <module>scenario-09-multiway-join-recovery</module>
+        <!-- Scenarios 11, 12, 14: SQL-only, no Maven module -->
+        <module>scenario-13-fluss-partial-updates</module>
+        <module>scenario-15-fluss-java-clients</module>
+        <module>scenario-16-fluss-paimon-tiered-spark</module>
     </modules>
 
     <properties>
@@ -30,8 +37,12 @@
         <flink.kafka.connector.version>3.4.0-1.20</flink.kafka.connector.version>
         <flink.jdbc.connector.version>3.3.0-1.20</flink.jdbc.connector.version>
         <paimon.version>1.0.1</paimon.version>
+        <fluss.version>0.9.1-incubating</fluss.version>
+        <spark.version>3.5.5</spark.version>
+        <spark.scala.binary.version>2.12</spark.scala.binary.version>
         <kafka.clients.version>3.7.0</kafka.clients.version>
         <postgresql.version>42.7.3</postgresql.version>
+        <caffeine.version>3.1.8</caffeine.version>
         <jackson.version>2.17.1</jackson.version>
         <log4j.version>2.23.1</log4j.version>
         <slf4j.version>2.0.13</slf4j.version>
@@ -116,6 +127,47 @@
                 <scope>provided</scope>
             </dependency>
 
+            <!-- Apache Fluss — streaming storage (scenarios 11-16). -->
+            <!-- fluss-client: pure Java SDK for point-in-time lookups -->
+            <dependency>
+                <groupId>org.apache.fluss</groupId>
+                <artifactId>fluss-client</artifactId>
+                <version>${fluss.version}</version>
+            </dependency>
+            <!-- fluss-common: shared types (Row, schema) -->
+            <dependency>
+                <groupId>org.apache.fluss</groupId>
+                <artifactId>fluss-common</artifactId>
+                <version>${fluss.version}</version>
+            </dependency>
+            <!-- Flink connector — provided at runtime by the workshop/flink-fluss image -->
+            <dependency>
+                <groupId>org.apache.fluss</groupId>
+                <artifactId>fluss-flink-1.20</artifactId>
+                <version>${fluss.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- Apache Spark — used by scenario-16 -->
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-core_${spark.scala.binary.version}</artifactId>
+                <version>${spark.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.spark</groupId>
+                <artifactId>spark-sql_${spark.scala.binary.version}</artifactId>
+                <version>${spark.version}</version>
+                <scope>provided</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.paimon</groupId>
+                <artifactId>paimon-spark-3.5</artifactId>
+                <version>${paimon.version}</version>
+                <scope>provided</scope>
+            </dependency>
+
             <!-- Kafka native client (for DuplicateEventProducer in scenario-04) -->
             <dependency>
                 <groupId>org.apache.kafka</groupId>
@@ -140,6 +192,13 @@
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
                 <version>${postgresql.version}</version>
+            </dependency>
+
+            <!-- Caching for async lookup joins (scenarios 08/09) -->
+            <dependency>
+                <groupId>com.github.ben-manes.caffeine</groupId>
+                <artifactId>caffeine</artifactId>
+                <version>${caffeine.version}</version>
             </dependency>
 
             <!-- Logging -->

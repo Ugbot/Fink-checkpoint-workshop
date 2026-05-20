@@ -17,3 +17,25 @@ SELECT event_id, COUNT(*) AS cnt
 FROM processed_trades
 GROUP BY event_id
 HAVING COUNT(*) > 1;
+
+-- ── Scenarios 07–09 (joins) ──────────────────────────────────────────────────
+
+-- Slow-changing dimension table for the lookup-join demos (scenarios 08a, 09).
+-- Populated by com.workshop.flink.common.setup.AccountSeedJob.
+CREATE TABLE IF NOT EXISTS accounts (
+    account_id    VARCHAR(20)  PRIMARY KEY,
+    account_name  VARCHAR(64)  NOT NULL,
+    tier          VARCHAR(16)  NOT NULL,
+    region        VARCHAR(16)  NOT NULL,
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Sink for the FULL OUTER join in scenario 07a — records fills that arrive
+-- without a corresponding order. The job upserts on event_id so replays are idempotent.
+CREATE TABLE IF NOT EXISTS fills_orphan_log (
+    event_id    VARCHAR(36)  PRIMARY KEY,
+    ticker      VARCHAR(10)  NOT NULL,
+    fill_time   TIMESTAMPTZ  NOT NULL,
+    reason      VARCHAR(64)  NOT NULL,
+    logged_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);

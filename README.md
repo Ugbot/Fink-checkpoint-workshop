@@ -1,6 +1,6 @@
-# Flink Workshop: Reliability, Failover and Deduplication
+# Flink Workshop: Reliability, Failover, Joins, Time
 
-A hands-on workshop exploring how Apache Flink handles failures, replay, and duplicate data across five progressively more complex scenarios. Each scenario is a self-contained pair of streaming jobs wired together through Kafka, with PostgreSQL as an external sink in Scenario 3.
+A hands-on workshop exploring how Apache Flink handles failures, replay, joins, and time semantics across ten progressively more complex scenarios. Scenarios 01–06 cover reliability/exactly-once/dedup/rescaling/lakehouse; 07–09 walk through every flavour of join Flink supports (regular, interval, window, lookup, temporal, multi-way) with a failure-aware capstone; 10 is a SQL-only deep dive on event-time, watermarks, and late data.
 
 ---
 
@@ -172,23 +172,122 @@ open http://localhost:3000          # web UI with prebaked queries
 
 ---
 
+## Joins Track (07–09)
+
+Three scenarios that cover every flavour of join Flink supports. Each one ships a DataStream implementation **and** the equivalent Flink SQL in `sql-notes/scenario-sql-equivalents.md` so learners can compare both APIs side by side.
+
+| # | What it teaches | Module |
+|---|---|---|
+| 07 | Stream-stream joins: INNER / LEFT / RIGHT / FULL OUTER, interval (±5s), tumbling window | `scenario-07-stream-stream-joins` |
+| 08 | Stream-table joins: async lookup vs temporal/versioned (FX rate AS OF tradeTime) | `scenario-08-stream-table-joins` |
+| 09 | Multi-way join (trade ⋈ quote ⋈ fx ⋈ account) + deliberate crash + recovery | `scenario-09-multiway-join-recovery` |
+
+### Scenario 07 — Stream-Stream Joins
+
+Three apps in one module, each demoing a different join kind:
+
+- `App07RegularJoin` — `topic.orders` ⋈ `topic.fills` keyed by eventId. Output has a `joinKind ∈ {INNER, LEFT_ORPHAN, RIGHT_ORPHAN}` tag so all four SQL join kinds are demonstrated from one stream. Bounded by per-key processing-time timer (30s) + `StateTtlConfig` (1h). Datagen comes from `OrderFillSplitterJob` which fans `topic.in` into orders + fills with configurable drop/orphan rates.
+- `App07IntervalJoin` — `trades.intervalJoin(quotes).between(-5s, +5s)` by ticker. State is bounded by the interval itself — no TTL needed.
+- `App07WindowJoin` — 1-minute tumbling event-time co-windows of trade and quote counts per ticker.
+
+**Teaching points:** regular joins keep state forever unless TTL'd; interval joins evict automatically; window joins only emit when both sides have data in the same window.
+
+**Run:** `./quickstart.sh 7` &nbsp;·&nbsp; **Verify:** `bash scripts/verify-07.sh`
+
+### Scenario 08 — Stream-Table Joins
+
+- `App08LookupJoin` — `AsyncDataStream.unorderedWait` calling Postgres `accounts` via `RichAsyncFunction` + HikariCP + a Caffeine 5-minute LRU cache. Pure processing-time semantics.
+- `App08TemporalJoin` — `KeyedCoProcessFunction` with `MapState<rateTime, rate>` per currency. Looks up the latest rate where `rateTime ≤ trade.tradeTime` — event-time AS-OF semantics.
+
+**Teaching point:** lookup join answers "current row, processing time"; temporal join answers "row as of event time". They're routinely confused — running both back-to-back makes the difference unmistakable.
+
+**Run:** `./quickstart.sh 8` &nbsp;·&nbsp; **Verify:** `bash scripts/verify-08.sh`
+
+### Scenario 09 — Multi-Way Join + Crash Recovery
+
+`App09MultiWayJoin` chains all three join styles: interval (trade ⋈ quote) → temporal (... ⋈ fx) → async lookup (... ⋈ account). `CrashTrigger` fires after `CRASH_AFTER_RECORDS=5000` enriched records. EXACTLY_ONCE Kafka sink + read_committed consumer prove the join state recovers correctly across the crash.
+
+**Teaching points:** join state lives in keyed state and is checkpointed like everything else; watermark alignment across three event-time streams matters; state size grows regular > interval > window.
+
+**Run:** `./quickstart.sh 9` &nbsp;·&nbsp; **Verify:** `bash scripts/verify-09.sh`
+
+---
+
+## Scenario 10 — Event Time, Watermarks, Late Data (SQL-only)
+
+Eight progressive `.sql` files under `scenario-10-event-time-sql/sql/`, taught through the SQL Gateway from scenario 06:
+
+1. `PROCTIME()` baseline
+2. Event-time + `WATERMARK FOR ts AS ts - INTERVAL '5' SECOND`
+3. Processing-time tumbling window
+4. Event-time tumbling window — same SELECT, deterministic under replay
+5. `scan.watermark.idle-timeout` — keep watermarks moving when a partition pauses
+6. `table.exec.window-allowed-lateness` — retract+revise output for late events
+7. Route late-arriving records to a side topic via `CURRENT_WATERMARK()`
+8. `scan.watermark.alignment.*` — bound the gap between fast and slow partitions
+
+**Run:** `./quickstart.sh 10` then `bash scripts/run-scenario-10-sql.sh`
+
+---
+
+## Apache Fluss Track (11–16)
+
+Six new scenarios introducing **Apache Fluss (incubating)** — a streaming
+storage system designed for Flink that fills the gap between Kafka and a
+lakehouse. Each one builds on the previous; learners start with zero
+Fluss knowledge in scenario 11.
+
+| # | Module | Focus |
+|---|---|---|
+| 11 | `scenario-11-fluss-fundamentals` | What Fluss is, log vs PK tables, why-Fluss-vs-Kafka (SQL only) |
+| 12 | `scenario-12-fluss-wide-schemas` | 45-column financial schemas + projection/filter pushdown (SQL only) |
+| 13 | `scenario-13-fluss-partial-updates` | Customer-360 from 3 sources, all four merge engines + Java DataStream `WideProfileUpdaterJob` |
+| 14 | `scenario-14-fluss-streaming-joins` | Lookup joins from streams into Fluss PK tables + delta-join concept (SQL only) |
+| 15 | `scenario-15-fluss-java-clients` | Three Java apps: SDK point-lookup, HTTP service, Flink connector enrichment |
+| 16 | `scenario-16-fluss-paimon-tiered-spark` | `'table.datalake.enabled' = 'true'` + Spark Java jobs against both Paimon and live Fluss |
+
+**Prereqs for the Fluss track:**
+```bash
+podman-compose up -d --build         # spins up Fluss coordinator + 2 tablet servers + Spark
+bash scripts/init-fluss.sh           # creates Fluss catalog, database, and all workshop tables
+bash scripts/seed-fluss.sh           # streams wide financial data into every table
+```
+
+**Run a Fluss scenario:**
+```bash
+./quickstart.sh 11    # … or 12 / 13 / 14 / 15 / 16
+bash scripts/verify-11.sh
+```
+
+Each scenario's README + `WORKSHOP.md` is a self-contained teaching path.
+Scenario 11's `sql/06-kafka-compacted-vs-fluss.sql` is the centerpiece
+"why Fluss?" comparison.
+
+---
+
 ## Infrastructure
 
 | Service | Image | Port |
 |---|---|---|
-| Zookeeper | `bitnami/zookeeper:3.9` | 2181 |
-| Kafka | `bitnami/kafka:3.7` | 9092 (host), 9093 (internal) |
-| Kafka UI | `provectuslabs/kafka-ui:latest` | 8080 |
-| PostgreSQL | `postgres:16` | 5432 |
-| Flink JobManager (ingest) | `workshop/flink-paimon:1.20` | 18081 |
-| Flink TaskManager (ingest) | `workshop/flink-paimon:1.20` | — |
-| Flink JobManager (query, scenario 6) | `workshop/flink-paimon:1.20` | 18181 |
-| Flink TaskManager (query, scenario 6) | `workshop/flink-paimon:1.20` | — |
-| Flink SQL Gateway (scenario 6) | `workshop/flink-paimon:1.20` | 18083 (REST) |
-| MinIO (scenario 6) | `minio/minio:latest` | 19000 (S3), 19001 (console) |
-| Query Web UI (scenario 6) | `workshop/query-ui:latest` | 3000 |
+| Kafka | `apache/kafka:4.2.0` | 19092 (host), 9093 (internal) |
+| PostgreSQL | `postgres:16` | 15432 |
+| Flink JobManager (ingest) | `workshop/flink-fluss:1.20` | 18081 |
+| Flink TaskManager (ingest) | `workshop/flink-fluss:1.20` | — |
+| Flink JobManager (query) | `workshop/flink-fluss:1.20` | 18181 |
+| Flink TaskManager (query) | `workshop/flink-fluss:1.20` | — |
+| Flink SQL Gateway | `workshop/flink-fluss:1.20` | 18083 (REST) |
+| MinIO | `minio/minio:latest` | 19000 (S3), 19001 (console) |
+| Query Web UI | `workshop/query-ui:latest` | 3000 |
+| Fluss ZooKeeper (scenarios 11–16) | `zookeeper:3.9.2` | — |
+| Fluss Coordinator | `apache/fluss:0.9.1-incubating` | 19123 (protocol) |
+| Fluss TabletServer ×2 | `apache/fluss:0.9.1-incubating` | — |
+| Spark 3.5 (scenario 16) | `workshop/spark-paimon-fluss:3.5.5` | 14040 (Spark UI) |
 
-Kafka topics: `topic.in` · `topic.mid` · `topic.out` (4 partitions each)
+Kafka topics:
+- Scenarios 01–05: `topic.in` · `topic.mid` · `topic.out` (4 partitions each)
+- Scenario 06: `trades.scenario06`
+- Scenarios 07–09: `topic.quotes` · `topic.fxrates` (1 partition — preserves changelog ordering) · `topic.orders` · `topic.fills` · `topic.enriched.s07` · `topic.enriched.s08` · `topic.enriched.s09`
+- Scenario 10: `topic.late.s10`
 
 PostgreSQL credentials: `workshop / workshop / workshop`
 
@@ -209,6 +308,16 @@ flink-examples/
 ├── scenario-04-upstream-true-duplicates/
 ├── scenario-05-rescaling-replay/
 ├── scenario-06-paimon-lakehouse/        # Kafka -> Paimon + SQL Gateway
+├── scenario-07-stream-stream-joins/     # regular / interval / window joins
+├── scenario-08-stream-table-joins/      # lookup (Postgres) vs temporal (FX)
+├── scenario-09-multiway-join-recovery/  # trade ⋈ quote ⋈ fx ⋈ account + crash
+├── scenario-10-event-time-sql/          # SQL-only: event-time, watermarks, late data
+├── scenario-11-fluss-fundamentals/      # SQL: what is Fluss + log/PK tables
+├── scenario-12-fluss-wide-schemas/      # SQL: wide schemas + projection pushdown
+├── scenario-13-fluss-partial-updates/   # SQL + Java: merge engines, partial-update job
+├── scenario-14-fluss-streaming-joins/   # SQL: lookup join + delta-join concept
+├── scenario-15-fluss-java-clients/      # Java: SDK + HTTP service + Flink+Fluss DataStream
+├── scenario-16-fluss-paimon-tiered-spark/  # SQL + Spark: tiered storage to Paimon
 ├── docker/
 │   ├── flink-paimon/                    # Flink 1.20 image + Paimon + S3 plugin
 │   └── query-ui/                        # Node web UI for ad-hoc SQL Gateway queries

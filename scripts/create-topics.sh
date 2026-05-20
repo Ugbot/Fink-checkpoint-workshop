@@ -9,7 +9,29 @@ RF=1
 
 echo "Creating Kafka topics on $BOOTSTRAP ..."
 
-for TOPIC in "topic.in" "topic.mid" "topic.out" "trades.scenario06"; do
+TOPICS=(
+  # Existing scenarios 01-06
+  "topic.in"
+  "topic.mid"
+  "topic.out"
+  "trades.scenario06"
+  # Scenarios 07-09 (joins)
+  "topic.quotes"
+  "topic.fxrates:1"           # single partition: preserve global FX ordering for temporal join
+  "topic.orders"
+  "topic.fills"
+  "topic.enriched.s07"
+  "topic.enriched.s08"
+  "topic.enriched.s09"
+)
+
+for ENTRY in "${TOPICS[@]}"; do
+  TOPIC="${ENTRY%%:*}"
+  OVERRIDE_PARTS=""
+  if [[ "$ENTRY" == *:* ]]; then
+    OVERRIDE_PARTS="${ENTRY##*:}"
+  fi
+  PARTS="${OVERRIDE_PARTS:-$PARTITIONS}"
   if podman exec workshop-kafka /opt/kafka/bin/kafka-topics.sh \
       --bootstrap-server "$INTERNAL_BOOTSTRAP" \
       --list 2>/dev/null | grep -qx "$TOPIC"; then
@@ -19,10 +41,10 @@ for TOPIC in "topic.in" "topic.mid" "topic.out" "trades.scenario06"; do
         --bootstrap-server "$INTERNAL_BOOTSTRAP" \
         --create \
         --topic "$TOPIC" \
-        --partitions "$PARTITIONS" \
+        --partitions "$PARTS" \
         --replication-factor "$RF" \
         --config min.insync.replicas=1
-    echo "  Created $TOPIC ($PARTITIONS partitions, RF=$RF)"
+    echo "  Created $TOPIC ($PARTS partitions, RF=$RF)"
   fi
 done
 

@@ -272,3 +272,219 @@ ORDER BY snapshot_id DESC;
 ```
 
 **Snapshot visibility:** Paimon only publishes a new snapshot at Flink checkpoint barriers. With the workshop's default 10-second checkpoint interval, query results lag the Kafka source by at most one checkpoint — this is why `verify-06.sh` tolerates a small `kafka - paimon` delta.
+
+---
+
+## Scenario 07 — Stream-Stream Joins (regular, interval, window)
+
+Shared event-time DDL used by the join queries below:
+
+```sql
+CREATE TABLE kafka_trades (
+  event_id   STRING,
+  account_id STRING,
+  ticker     STRING,
+  side       STRING,
+  quantity   INT,
+  price      DOUBLE,
+  trade_time BIGINT,
+  trade_ts   AS TO_TIMESTAMP_LTZ(trade_time, 3),
+  WATERMARK FOR trade_ts AS trade_ts - INTERVAL '5' SECOND
+) WITH ('connector'='kafka', 'topic'='topic.in', /* ... */);
+
+CREATE TABLE kafka_quotes (
+  quote_id   STRING,
+  ticker     STRING,
+  bid        DOUBLE,
+  ask        DOUBLE,
+  quote_time BIGINT,
+  quote_ts   AS TO_TIMESTAMP_LTZ(quote_time, 3),
+  WATERMARK FOR quote_ts AS quote_ts - INTERVAL '5' SECOND
+) WITH ('connector'='kafka', 'topic'='topic.quotes', /* ... */);
+
+CREATE TABLE kafka_orders (...);  -- same shape as topic.orders
+CREATE TABLE kafka_fills  (...);  -- same shape as topic.fills
+```
+
+### Regular join — all four kinds in SQL
+
+```sql
+SET 'table.exec.state.ttl' = '3600000';  -- 1 hour, bounds unbounded join state
+
+-- INNER
+SELECT o.event_id, o.ticker, o.price AS order_price, f.price AS fill_price
+FROM kafka_orders o
+JOIN kafka_fills f ON o.event_id = f.event_id;
+
+-- LEFT OUTER (orders without fills)
+SELECT o.event_id, o.ticker, f.event_id IS NULL AS unfilled
+FROM kafka_orders o
+LEFT JOIN kafka_fills f ON o.event_id = f.event_id;
+
+-- RIGHT OUTER
+SELECT f.event_id, o.event_id IS NULL AS orphan_fill
+FROM kafka_orders o
+RIGHT JOIN kafka_fills f ON o.event_id = f.event_id;
+
+-- FULL OUTER
+SELECT COALESCE(o.event_id, f.event_id) AS event_id,
+       CASE WHEN o.event_id IS NULL THEN 'RIGHT_ORPHAN'
+            WHEN f.event_id IS NULL THEN 'LEFT_ORPHAN'
+            ELSE 'INNER' END AS join_kind
+FROM kafka_orders o
+FULL OUTER JOIN kafka_fills f ON o.event_id = f.event_id;
+```
+
+**Key point:** `table.exec.state.ttl` is the *only* lever for bounding regular-join state in pure SQL. The DataStream equivalent (`OrderFillRegularJoin`) uses `StateTtlConfig` *plus* per-key processing-time timers — strictly more control than SQL offers.
+
+### Interval join — time-bounded SQL
+
+```sql
+SELECT t.event_id, t.ticker, t.price, q.bid, q.ask
+FROM kafka_trades t, kafka_quotes q
+WHERE t.ticker = q.ticker
+  AND q.quote_ts BETWEEN t.trade_ts - INTERVAL '5' SECOND
+                     AND t.trade_ts + INTERVAL '5' SECOND;
+```
+
+The planner recognizes the `BETWEEN` predicate as an interval join and generates a bounded-state operator — same one Flink uses for `intervalJoin(...).between(...)` in DataStream. No TTL knob needed; the bound itself is the eviction policy.
+
+### Window join — co-windowed counts
+
+```sql
+SELECT t.window_start, t.window_end, t.ticker,
+       t.trade_count, q.quote_count
+FROM (
+  SELECT window_start, window_end, ticker, COUNT(*) AS trade_count
+  FROM TABLE(TUMBLE(TABLE kafka_trades, DESCRIPTOR(trade_ts), INTERVAL '1' MINUTE))
+  GROUP BY window_start, window_end, ticker
+) t
+JOIN (
+  SELECT window_start, window_end, ticker, COUNT(*) AS quote_count
+  FROM TABLE(TUMBLE(TABLE kafka_quotes, DESCRIPTOR(quote_ts), INTERVAL '1' MINUTE))
+  GROUP BY window_start, window_end, ticker
+) q
+ON t.window_start = q.window_start AND t.ticker = q.ticker;
+```
+
+Uses the `TUMBLE` TVF (table-valued function) added in Flink 1.13, then a regular equi-join on the window boundaries.
+
+---
+
+## Scenario 08 — Stream-Table Joins (lookup vs temporal)
+
+### Lookup join (JDBC accounts dim)
+
+```sql
+CREATE TABLE accounts (
+  account_id   STRING,
+  account_name STRING,
+  tier         STRING,
+  region       STRING,
+  PRIMARY KEY (account_id) NOT ENFORCED
+) WITH (
+  'connector'              = 'jdbc',
+  'url'                    = 'jdbc:postgresql://workshop-postgres:5432/workshop',
+  'table-name'             = 'accounts',
+  'username'               = 'workshop',
+  'password'               = 'workshop',
+  'driver'                 = 'org.postgresql.Driver',
+  'lookup.cache'           = 'PARTIAL',
+  'lookup.partial-cache.max-rows' = '1000',
+  'lookup.partial-cache.expire-after-write' = '5 min'
+);
+
+-- Lookup join uses FOR SYSTEM_TIME AS OF PROCTIME()
+SELECT t.event_id, t.ticker, a.account_name, a.tier, a.region
+FROM kafka_trades t
+LEFT JOIN accounts FOR SYSTEM_TIME AS OF t.trade_ts AS a
+  ON t.account_id = a.account_id;
+```
+
+**Note:** the JDBC connector's built-in `lookup.partial-cache.*` config is the SQL equivalent of the Caffeine cache used in `App08LookupJoin.java`. Same semantics: processing-time lookup, cache TTL, async pool managed by the connector.
+
+### Temporal (versioned) join — FX rate AS OF trade_ts
+
+```sql
+CREATE TABLE kafka_fxrates (
+  currency   STRING,
+  rate       DOUBLE,
+  rate_time  BIGINT,
+  rate_ts    AS TO_TIMESTAMP_LTZ(rate_time, 3),
+  WATERMARK FOR rate_ts AS rate_ts - INTERVAL '2' SECOND,
+  PRIMARY KEY (currency) NOT ENFORCED
+) WITH (
+  'connector' = 'upsert-kafka',
+  'topic'     = 'topic.fxrates',
+  'properties.bootstrap.servers' = 'workshop-kafka:9093',
+  'key.format'   = 'raw',
+  'value.format' = 'json'
+);
+
+-- Notice the AS OF column is the trade's event-time, not PROCTIME().
+-- The planner generates a TemporalRowTimeJoin operator backed by per-key state.
+SELECT t.event_id, t.ticker, fx.currency, fx.rate, fx.rate_ts
+FROM kafka_trades t
+LEFT JOIN kafka_fxrates FOR SYSTEM_TIME AS OF t.trade_ts AS fx
+  ON CurrencyOf(t.account_id) = fx.currency;   -- CurrencyOf is a user-defined function
+```
+
+**The fundamental difference:**
+- Lookup join → `FOR SYSTEM_TIME AS OF PROCTIME()` → answers "current row" at runtime
+- Temporal join → `FOR SYSTEM_TIME AS OF <event_time_col>` → answers "row in effect at event time"
+
+The lookup join's output is **non-deterministic** under replay; the temporal join's output **is** deterministic. Pick based on whether your downstream system tolerates drift.
+
+---
+
+## Scenario 09 — Multi-Way Join + Recovery
+
+```sql
+INSERT INTO kafka_enriched_s09
+SELECT
+  t.event_id, t.ticker, t.quantity, t.price,
+  q.bid, q.ask,
+  fx.currency, fx.rate, fx.rate_ts AS fx_as_of,
+  a.account_name, a.tier, a.region,
+  t.quantity * t.price * fx.rate AS notional_usd
+FROM kafka_trades t
+JOIN kafka_quotes q
+  ON t.ticker = q.ticker
+ AND q.quote_ts BETWEEN t.trade_ts - INTERVAL '5' SECOND
+                    AND t.trade_ts + INTERVAL '5' SECOND
+LEFT JOIN kafka_fxrates FOR SYSTEM_TIME AS OF t.trade_ts AS fx
+  ON CurrencyOf(t.account_id) = fx.currency
+LEFT JOIN accounts FOR SYSTEM_TIME AS OF t.trade_ts AS a
+  ON t.account_id = a.account_id;
+```
+
+Pedagogically equivalent to the DataStream pipeline in `App09MultiWayJoin.java`. **Recovery semantics are identical** — both compile to checkpointed keyed-state operators. The DataStream version is exposed because (a) it's easier to drop a `CrashTrigger` into custom operators, and (b) the per-operator state behaviour is observable in the Flink UI's operator panel.
+
+Watermark alignment in SQL — the SQL equivalent of `withWatermarkAlignment` is per-source DDL:
+
+```sql
+CREATE TABLE kafka_trades_aligned ( ... ) WITH (
+  ...
+  'scan.watermark.alignment.group'           = 's09-aligned',
+  'scan.watermark.alignment.max-drift'       = '30 s',
+  'scan.watermark.alignment.update-interval' = '1 s'
+);
+```
+
+All sources sharing the same `alignment.group` name stall together when one runs more than `max-drift` ahead of another.
+
+---
+
+## Scenario 10 — Event Time, Watermarks, Late Data (SQL-only)
+
+This scenario lives entirely in `scenario-10-event-time-sql/sql/*.sql`. It's the SQL-only complement to scenarios 07–09:
+
+- `01-source-proctime.sql` — bare DDL using `PROCTIME()`
+- `02-source-event-time.sql` — `WATERMARK FOR ts AS ts - INTERVAL '5' SECOND`
+- `03-tumbling-proctime.sql` vs `04-tumbling-event-time.sql` — same window, different semantics
+- `05-idle-source-timeout.sql` — `scan.watermark.idle-timeout`
+- `06-allowed-lateness.sql` — `table.exec.window-allowed-lateness` (retract/revise)
+- `07-late-data-side-channel.sql` — `CURRENT_WATERMARK()` predicate to route late records to a dedicated topic
+- `08-watermark-alignment.sql` — `scan.watermark.alignment.*` per source
+
+Run via `bash scripts/run-scenario-10-sql.sh`.

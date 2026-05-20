@@ -20,6 +20,7 @@ KAFKA_INTERNAL="workshop-kafka:9093"   # container-to-container listener
 PG_URL_INTERNAL="jdbc:postgresql://workshop-postgres:5432/workshop"
 PG_USER="workshop"
 PG_PASSWORD="workshop"
+FLUSS_INTERNAL="workshop-fluss-coordinator:9123"
 
 # ── colours ────────────────────────────────────────────────────────────────────
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
@@ -120,6 +121,32 @@ run_datagen() {
         "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
 }
 
+run_extra_datagen_joins() {
+    header "Datagen for joins track (Quotes + FX + OrderFill splitter)"
+    submit_job "Quote datagen" \
+        "common/target/flink-workshop-common-quote-datagen-jar-with-dependencies.jar" \
+        "com.workshop.flink.common.datagen.QuoteDatagenJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+    submit_job "FX rate datagen" \
+        "common/target/flink-workshop-common-fx-datagen-jar-with-dependencies.jar" \
+        "com.workshop.flink.common.datagen.FxRateDatagenJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+    submit_job "Order/Fill splitter" \
+        "common/target/flink-workshop-common-order-fill-splitter-jar-with-dependencies.jar" \
+        "com.workshop.flink.common.datagen.OrderFillSplitterJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+}
+
+seed_accounts() {
+    header "Seeding Postgres 'accounts' table (scenarios 08 + 09)"
+    ACCOUNT_COUNT="${ACCOUNT_COUNT:-50}" \
+    KAFKA_INTERNAL="$KAFKA_INTERNAL" \
+    PG_URL_INTERNAL="$PG_URL_INTERNAL" \
+    PG_USER="$PG_USER" \
+    PG_PASSWORD="$PG_PASSWORD" \
+        bash scripts/seed-accounts.sh
+}
+
 run_scenario_01() {
     header "Scenario 01 — Baseline AT_LEAST_ONCE"
     submit_job "S01 App1 (AT_LEAST_ONCE producer)" \
@@ -190,6 +217,126 @@ run_scenario_05() {
         "APP2_PARALLELISM=2"
 }
 
+run_scenario_07() {
+    header "Scenario 07 — Stream-Stream Joins (regular, interval, window)"
+    run_extra_datagen_joins
+    submit_job "S07a Regular join (orders ⋈ fills, all join kinds)" \
+        "scenario-07-stream-stream-joins/target/scenario-07-regular-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario07.App07RegularJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+    submit_job "S07b Interval join (trade ⋈ quote ±5s)" \
+        "scenario-07-stream-stream-joins/target/scenario-07-interval-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario07.App07IntervalJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+    submit_job "S07c Window join (1m tumbling)" \
+        "scenario-07-stream-stream-joins/target/scenario-07-window-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario07.App07WindowJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+}
+
+run_scenario_08() {
+    header "Scenario 08 — Stream-Table Joins (lookup vs temporal)"
+    run_extra_datagen_joins
+    seed_accounts
+    submit_job "S08a Lookup join (Postgres accounts, async + Caffeine)" \
+        "scenario-08-stream-table-joins/target/scenario-08-lookup-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario08.App08LookupJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL" \
+        "PG_URL=$PG_URL_INTERNAL" \
+        "PG_USER=$PG_USER" \
+        "PG_PASSWORD=$PG_PASSWORD"
+    submit_job "S08b Temporal join (trade AS OF fx, versioned)" \
+        "scenario-08-stream-table-joins/target/scenario-08-temporal-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario08.App08TemporalJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+}
+
+run_scenario_09() {
+    header "Scenario 09 — Multi-Way Join + Crash Recovery"
+    run_extra_datagen_joins
+    seed_accounts
+    submit_job "S09 Multi-way join (trade ⋈ quote ⋈ fx ⋈ account, crash @ 5000)" \
+        "scenario-09-multiway-join-recovery/target/scenario-09-multiway-join-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario09.App09MultiWayJoin" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL" \
+        "PG_URL=$PG_URL_INTERNAL" \
+        "PG_USER=$PG_USER" \
+        "PG_PASSWORD=$PG_PASSWORD" \
+        "CRASH_AFTER_RECORDS=${CRASH_AFTER_RECORDS:-5000}"
+}
+
+run_scenario_10() {
+    header "Scenario 10 — Event-Time, Watermarks, Late Data (SQL-only)"
+    log "This scenario is SQL-first and uses the scenario-06 SQL Gateway."
+    log "Submit the late-data datagen job, then run scripts/run-scenario-10-sql.sh."
+    submit_job "Late-arriving trade datagen" \
+        "common/target/flink-workshop-common-datagen-jar-with-dependencies.jar" \
+        "com.workshop.flink.common.datagen.FinancialDatagenJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL"
+    log "Run: bash scripts/run-scenario-10-sql.sh   # walks through the SQL teaching path"
+}
+
+bootstrap_fluss() {
+    header "Bootstrapping Fluss catalog + seeding wide PK tables"
+    bash scripts/init-fluss.sh
+    bash scripts/seed-fluss.sh
+}
+
+run_scenario_11() {
+    header "Scenario 11 — Fluss Fundamentals (SQL-only)"
+    bootstrap_fluss
+    log "Open the SQL Client (bash scripts/sql-client.sh) and paste sql/01..07 in order."
+    log "See scenario-11-fluss-fundamentals/WORKSHOP.md for the deep walkthrough."
+}
+
+run_scenario_12() {
+    header "Scenario 12 — Wide schemas + projection pushdown (SQL-only)"
+    bootstrap_fluss
+    log "Open the SQL Client and paste scenario-12-fluss-wide-schemas/sql/01..06."
+}
+
+run_scenario_13() {
+    header "Scenario 13 — Partial Updates + Merge Engines"
+    bootstrap_fluss
+    log "SQL teaching path: sql/01..05 in the SQL Client."
+    submit_job "S13 WideProfileUpdaterJob (production-shaped partial-update fan-out)" \
+        "scenario-13-fluss-partial-updates/target/scenario-13-wide-profile-updater-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario13.WideProfileUpdaterJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL" \
+        "FLUSS_BOOTSTRAP=$FLUSS_INTERNAL"
+}
+
+run_scenario_14() {
+    header "Scenario 14 — Streaming Joins (SQL-only)"
+    bootstrap_fluss
+    log "Make sure FinancialDatagenJob is running (./quickstart.sh datagen)."
+    log "Open the SQL Client and paste scenario-14-fluss-streaming-joins/sql/01..05."
+}
+
+run_scenario_15() {
+    header "Scenario 15 — Fluss Java Clients"
+    bootstrap_fluss
+    log "Three apps available in scenario-15-fluss-java-clients/target/:"
+    log "  - point-in-time-lookup: standalone Java SDK client"
+    log "  - http-service: REST service over Fluss"
+    log "  - flink-enrichment: DataStream + Fluss connector"
+    log "See README for run commands."
+    submit_job "S15 FlussFlinkConnectorEnrichmentJob (Flink + Fluss lookup join)" \
+        "scenario-15-fluss-java-clients/target/scenario-15-flink-enrichment-jar-with-dependencies.jar" \
+        "com.workshop.flink.scenario15.FlussFlinkConnectorEnrichmentJob" \
+        "KAFKA_BOOTSTRAP=$KAFKA_INTERNAL" \
+        "FLUSS_BOOTSTRAP=$FLUSS_INTERNAL"
+}
+
+run_scenario_16() {
+    header "Scenario 16 — Tiered Storage + Spark"
+    bootstrap_fluss
+    log "1. Paste scenario-16-fluss-paimon-tiered-spark/sql/01-enable-tiering.sql"
+    log "2. Wait ~1 minute for tiering to fire"
+    log "3. Inspect with sql/02..04, then run:"
+    log "   bash scripts/spark-submit-scenario-16.sh both"
+}
+
 # ── status ─────────────────────────────────────────────────────────────────────
 show_status() {
     header "Running Flink jobs"
@@ -210,9 +357,19 @@ stop_all() {
 # ── interactive menu ───────────────────────────────────────────────────────────
 interactive_menu() {
     printf "\n${BOLD}Workshop scenarios:${RESET}\n"
-    printf "  ${CYAN}all${RESET}     — datagen + all 5 scenarios\n"
+    printf "  ${CYAN}all${RESET}     — datagen + all scenarios\n"
     printf "  ${CYAN}datagen${RESET} — datagen job only\n"
-    printf "  ${CYAN}1${RESET} … ${CYAN}5${RESET}   — datagen + that scenario\n"
+    printf "  ${CYAN}1${RESET}–${CYAN}5${RESET}     — reliability/exactly-once/dedup/rescale\n"
+    printf "  ${CYAN}7${RESET}       — stream-stream joins (regular, interval, window)\n"
+    printf "  ${CYAN}8${RESET}       — stream-table joins (lookup vs temporal)\n"
+    printf "  ${CYAN}9${RESET}       — multi-way join + crash recovery\n"
+    printf "  ${CYAN}10${RESET}      — event-time, watermarks, late data (SQL)\n"
+    printf "  ${CYAN}11${RESET}      — Apache Fluss fundamentals (SQL)\n"
+    printf "  ${CYAN}12${RESET}      — Fluss wide schemas + projection pushdown (SQL)\n"
+    printf "  ${CYAN}13${RESET}      — Fluss partial updates + merge engines (SQL + Java)\n"
+    printf "  ${CYAN}14${RESET}      — Fluss streaming joins (SQL)\n"
+    printf "  ${CYAN}15${RESET}      — Fluss Java clients: SDK + HTTP service + Flink DataStream\n"
+    printf "  ${CYAN}16${RESET}      — Fluss tiered storage to Paimon + Spark queries\n"
     printf "  ${CYAN}stop${RESET}    — tear down containers\n"
     printf "  ${CYAN}status${RESET}  — show running jobs\n\n"
     read -r -p "Run which scenario(s)? [all] " choice
@@ -238,13 +395,31 @@ dispatch() {
                 run_scenario_03
                 run_scenario_04
                 run_scenario_05
+                run_scenario_07
+                run_scenario_08
+                run_scenario_09
+                run_scenario_10
+                run_scenario_11
+                run_scenario_12
+                run_scenario_13
+                run_scenario_14
+                run_scenario_15
+                run_scenario_16
                 ;;
             [1-5])
                 [[ $ran_datagen -eq 0 ]] && { run_datagen; ran_datagen=1; }
                 "run_scenario_0$arg"
                 ;;
+            7|8|9)
+                [[ $ran_datagen -eq 0 ]] && { run_datagen; ran_datagen=1; }
+                "run_scenario_0$arg"
+                ;;
+            10|11|12|13|14|15|16)
+                [[ $ran_datagen -eq 0 ]] && { run_datagen; ran_datagen=1; }
+                "run_scenario_$arg"
+                ;;
             *)
-                die "Unknown argument: $arg  (expected: all | datagen | 1-5 | stop | status)"
+                die "Unknown argument: $arg  (expected: all | datagen | 1-5 | 7..16 | stop | status)"
                 ;;
         esac
     done

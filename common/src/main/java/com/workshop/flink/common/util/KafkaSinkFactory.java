@@ -1,6 +1,10 @@
 package com.workshop.flink.common.util;
 
+import com.workshop.flink.common.model.FxRate;
+import com.workshop.flink.common.model.QuoteEvent;
 import com.workshop.flink.common.model.TradeEvent;
+import com.workshop.flink.common.serde.FxRateSerializationSchema;
+import com.workshop.flink.common.serde.QuoteEventSerializationSchema;
 import com.workshop.flink.common.serde.TradeEventSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.base.DeliveryGuarantee;
@@ -30,6 +34,22 @@ public final class KafkaSinkFactory {
             .setRecordSerializer(new TradeEventSerializationSchema(topic))
             .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
             .setTransactionalIdPrefix(transactionalIdPrefix)
+            .build();
+    }
+
+    public static KafkaSink<QuoteEvent> quotesAtLeastOnce(String bootstrap, String topic) {
+        return KafkaSink.<QuoteEvent>builder()
+            .setBootstrapServers(bootstrap)
+            .setRecordSerializer(new QuoteEventSerializationSchema(topic))
+            .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+            .build();
+    }
+
+    public static KafkaSink<FxRate> fxRatesAtLeastOnce(String bootstrap, String topic) {
+        return KafkaSink.<FxRate>builder()
+            .setBootstrapServers(bootstrap)
+            .setRecordSerializer(new FxRateSerializationSchema(topic))
+            .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
             .build();
     }
 

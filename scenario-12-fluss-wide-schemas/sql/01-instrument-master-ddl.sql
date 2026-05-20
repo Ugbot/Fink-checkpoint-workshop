@@ -1,0 +1,132 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- Scenario 12 — Step 01: The 45-column `instrument_master` security master
+-- ════════════════════════════════════════════════════════════════════════════
+--
+-- This scenario is the deep-dive on what makes a Fluss table different from
+-- a Kafka topic when the schema is **wide**. The canonical wide table is the
+-- workshop's `instrument_master`: a securities-reference table that mirrors
+-- what banks call a "security master" or "instrument master". It has 45
+-- columns split across seven domain groups:
+--
+--    Identity      — isin, cusip, sedol, ticker, exchange, mic, security_type
+--    Classification — sector, sub_sector, country, currency
+--    Trading       — lot_size, tick_size, min/max_notional, shortable, marginable
+--    Risk          — beta_1y/3y/5y, sector_beta, hedge_ratio, volatility_30d, VaR
+--    Fundamentals  — market_cap, free_float, dividend_yield, P/E, P/B, D/E
+--    ESG           — esg_score, environmental_score, social_score, governance_score
+--    Lifecycle     — listed_at, updated_at, issuer_name, issuer_lei, active_flag,
+--                    regulatory_status, source_system, last_close, 52w high/low,
+--                    prev_day_volume, avg_daily_volume_30d / 90d
+--
+-- The whole point of the next 6 steps is to show that even though the table
+-- is 45 columns wide, **a typical query only reads 3-6 of them**. Fluss's
+-- projection pushdown means the Flink job actually fetches only those columns
+-- off disk — not the full row.
+--
+-- For comparison, a Kafka topic carrying the same data as a JSON value would
+-- deserialize all 45 columns for every record consumed, regardless of which
+-- columns the query touched.
+--
+-- This step:
+--   (a) Registers the Fluss catalog.
+--   (b) DESCRIBEs `instrument_master` so the column list + types are visible.
+--   (c) Shows the table options (bucket count, primary key).
+--
+-- The DDL itself was already executed by FlussInitJob (scripts/init-fluss.sh) —
+-- we do not re-create the table here.
+
+CREATE CATALOG IF NOT EXISTS fluss WITH (
+  'type'              = 'fluss',
+  'bootstrap.servers' = 'workshop-fluss-coordinator:9123'
+);
+USE CATALOG fluss;
+USE workshop;
+
+-- ── (b) DESCRIBE the table — schema, types, PK ─────────────────────────────
+DESCRIBE instrument_master;
+-- Expected output is a 45-row table of (name, type, null, key, extras...).
+-- The PRIMARY KEY (isin) NOT ENFORCED line is what makes this a PK table —
+-- inserts upsert by isin, and `WHERE isin = '...'` is a point lookup.
+
+-- ── (c) Show table options — bucket.num = 4 ────────────────────────────────
+SHOW CREATE TABLE instrument_master;
+-- Look for `bucket.num = '4'` in the WITH(...) block. Buckets are Fluss's
+-- parallelism unit: 4 buckets means up to 4 concurrent readers/writers on
+-- this table, and the row's bucket is determined by hash(isin) % 4.
+
+-- ── Reference: the DDL FlussInitJob.java emitted ───────────────────────────
+-- (Reproduced here for learners to read, NOT executed — the table is already
+--  created.)
+--
+-- CREATE TABLE instrument_master (
+--   -- ── Identity ──────────────────────────────────────────────────────────
+--   isin                 STRING,    -- ISO 6166 — primary key
+--   cusip                STRING,    -- North American identifier
+--   sedol                STRING,    -- UK / Ireland identifier
+--   ticker               STRING,    -- exchange ticker (may collide across exchanges)
+--   exchange             STRING,    -- NYSE / NASDAQ / LSE / ...
+--   mic                  STRING,    -- ISO 10383 market identifier code
+--   security_type        STRING,    -- EQUITY / ETF / BOND / FUTURE / ...
+--
+--   -- ── Classification ────────────────────────────────────────────────────
+--   sector               STRING,    -- GICS sector
+--   sub_sector           STRING,    -- GICS sub-sector
+--   country              STRING,    -- ISO 3166 country of listing
+--   currency             STRING,    -- trading currency
+--
+--   -- ── Trading ──────────────────────────────────────────────────────────
+--   lot_size             DOUBLE,    -- min trade unit
+--   tick_size            DOUBLE,    -- min price increment
+--   min_notional         DOUBLE,    -- min order notional value
+--   max_order_qty        DOUBLE,    -- exchange-imposed max
+--   shortable            BOOLEAN,   -- can be shorted?
+--   marginable           BOOLEAN,   -- eligible for margin trading?
+--
+--   -- ── Pricing snapshot ─────────────────────────────────────────────────
+--   last_close           DOUBLE,    -- previous close
+--   fifty_two_week_high  DOUBLE,
+--   fifty_two_week_low   DOUBLE,
+--   prev_day_volume      DOUBLE,
+--   avg_daily_volume_30d DOUBLE,
+--   avg_daily_volume_90d DOUBLE,
+--
+--   -- ── Risk ─────────────────────────────────────────────────────────────
+--   beta_1y              DOUBLE,
+--   beta_3y              DOUBLE,
+--   beta_5y              DOUBLE,
+--   sector_beta          DOUBLE,
+--   hedge_ratio          DOUBLE,
+--   volatility_30d       DOUBLE,
+--   value_at_risk_95     DOUBLE,
+--
+--   -- ── Fundamentals ─────────────────────────────────────────────────────
+--   market_cap_usd       DOUBLE,
+--   free_float           DOUBLE,
+--   dividend_yield       DOUBLE,
+--   price_earnings       DOUBLE,
+--   price_book           DOUBLE,
+--   debt_to_equity       DOUBLE,
+--
+--   -- ── ESG ──────────────────────────────────────────────────────────────
+--   esg_score            DOUBLE,
+--   environmental_score  DOUBLE,
+--   social_score         DOUBLE,
+--   governance_score     DOUBLE,
+--
+--   -- ── Lifecycle / metadata ─────────────────────────────────────────────
+--   listed_at            BIGINT,
+--   updated_at           BIGINT,
+--   issuer_name          STRING,
+--   issuer_lei           STRING,    -- ISO 17442 legal entity identifier
+--   active_flag          BOOLEAN,
+--   regulatory_status    STRING,
+--   source_system        STRING,
+--   PRIMARY KEY (isin) NOT ENFORCED
+-- ) WITH (
+--   'bucket.num' = '4'
+-- );
+--
+-- Key takeaway: the table is a *real database table*, not an opaque message
+-- body. Every column is independently typed and individually addressable by
+-- the query planner. That's the prerequisite for projection pushdown, which
+-- step 03 measures.

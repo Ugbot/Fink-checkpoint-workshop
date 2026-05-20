@@ -122,4 +122,34 @@ public final class JobParams {
         return Long.parseLong(params.get("duplicate-delay-ms",
             System.getenv().getOrDefault("DUPLICATE_DELAY_MS", "200")));
     }
+
+    /** Quote events per second from QuoteDatagenJob. CLI: --quote-rate <n> */
+    public int quoteRate() {
+        return Integer.parseInt(params.get("quote-rate",
+            System.getenv().getOrDefault("QUOTE_RATE", "500")));
+    }
+
+    /** FX rate changelog events per second. CLI: --fx-rate <n> */
+    public int fxRate() {
+        return Integer.parseInt(params.get("fx-rate",
+            System.getenv().getOrDefault("FX_RATE", "5")));
+    }
+
+    /** Number of synthetic accounts seeded into Postgres. CLI: --account-count <n> */
+    public int accountCount() {
+        return Integer.parseInt(params.get("account-count",
+            System.getenv().getOrDefault("ACCOUNT_COUNT", "50")));
+    }
+
+    /** Probability (0..1) of dropping an order's fill — drives LEFT-OUTER demos. CLI: --drop-fill-pct */
+    public double dropFillPct() {
+        return Double.parseDouble(params.get("drop-fill-pct",
+            System.getenv().getOrDefault("DROP_FILL_PCT", "0.20")));
+    }
+
+    /** Probability of emitting a fill that has no order — drives RIGHT-OUTER demos. CLI: --orphan-fill-pct */
+    public double orphanFillPct() {
+        return Double.parseDouble(params.get("orphan-fill-pct",
+            System.getenv().getOrDefault("ORPHAN_FILL_PCT", "0.05")));
+    }
 }

@@ -12,8 +12,8 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.util.Arrays;
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -58,8 +58,21 @@ public class TopicSetupJob {
 
         @Override
         public String map(String bootstrap) throws Exception {
-            List<String> required = Arrays.asList(
-                Constants.TOPIC_IN, Constants.TOPIC_MID, Constants.TOPIC_OUT);
+            // Topic → partition count. The `fxrates` topic uses 1 partition so the
+            // per-currency changelog stays globally ordered for the temporal join.
+            Map<String, Integer> required = new LinkedHashMap<>();
+            // Scenarios 01–05
+            required.put(Constants.TOPIC_IN,  partitions);
+            required.put(Constants.TOPIC_MID, partitions);
+            required.put(Constants.TOPIC_OUT, partitions);
+            // Scenarios 07–09 (joins)
+            required.put(Constants.TOPIC_QUOTES,       partitions);
+            required.put(Constants.TOPIC_FXRATES,      1);
+            required.put(Constants.TOPIC_ORDERS,       partitions);
+            required.put(Constants.TOPIC_FILLS,        partitions);
+            required.put(Constants.TOPIC_ENRICHED_S07, partitions);
+            required.put(Constants.TOPIC_ENRICHED_S08, partitions);
+            required.put(Constants.TOPIC_ENRICHED_S09, partitions);
 
             Properties props = new Properties();
             props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
@@ -68,21 +81,23 @@ public class TopicSetupJob {
             try (AdminClient admin = AdminClient.create(props)) {
                 Set<String> existing = admin.listTopics().names().get();
 
-                List<NewTopic> toCreate = required.stream()
-                    .filter(t -> !existing.contains(t))
-                    .map(t -> new NewTopic(t, partitions, (short) 1))
+                java.util.List<NewTopic> toCreate = required.entrySet().stream()
+                    .filter(e -> !existing.contains(e.getKey()))
+                    .map(e -> new NewTopic(e.getKey(), e.getValue(), (short) 1))
                     .collect(Collectors.toList());
 
                 if (toCreate.isEmpty()) {
-                    LOG.info("All topics already exist: {}", required);
+                    LOG.info("All topics already exist: {}", required.keySet());
                 } else {
                     admin.createTopics(toCreate).all().get();
-                    toCreate.forEach(t -> LOG.info("Created topic {} ({} partitions)", t.name(), partitions));
+                    toCreate.forEach(t -> LOG.info("Created topic {} ({} partitions)",
+                                                   t.name(), t.numPartitions()));
                 }
 
                 Set<String> after = admin.listTopics().names().get();
-                long found = required.stream().filter(after::contains).count();
-                return String.format("Topics ready (%d/%d): %s", found, required.size(), required);
+                long found = required.keySet().stream().filter(after::contains).count();
+                return String.format("Topics ready (%d/%d): %s",
+                                     found, required.size(), required.keySet());
             }
         }
     }
